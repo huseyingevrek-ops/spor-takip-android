@@ -23,11 +23,23 @@ jobs:
         with:
           path: ~/.android/debug.keystore
           key: sportakip-debug-keystore-v1
+      - name: Prepare stable debug signing key
+        run: |
+          mkdir -p ~/.android
+          if [ ! -f ~/.android/debug.keystore ]; then
+            keytool -genkeypair -v \
+              -keystore ~/.android/debug.keystore \
+              -storepass android \
+              -alias androiddebugkey \
+              -keypass android \
+              -dname "CN=Android Debug,O=Android,C=US" \
+              -keyalg RSA -keysize 2048 -validity 10000
+          fi
       - name: Build debug APK
         run: gradle :app:assembleDebug --stacktrace
       - name: Signing fingerprint
         run: |
-          keytool -list -v -keystore ~/.android/debug.keystore -alias androiddebugkey -storepass android -keypass android | grep -E 'SHA1:|SHA256:' > signing-fingerprint.txt
+          keytool -list -v -keystore ~/.android/debug.keystore -alias androiddebugkey -storepass android -keypass android > signing-fingerprint.txt
       - name: Rename APK
         run: cp app/build/outputs/apk/debug/app-debug.apk SporTakip.apk
       - uses: actions/upload-artifact@v4
