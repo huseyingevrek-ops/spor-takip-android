@@ -5,7 +5,7 @@ plugins {
 
 android {
     namespace = "com.i4ae.sportakip"
-    compileSdk = 35
+    compileSdk = 36
 
     defaultConfig {
         applicationId = "com.i4ae.sportakip"
