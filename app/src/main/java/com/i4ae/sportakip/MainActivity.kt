@@ -238,7 +238,12 @@ class MainActivity : ComponentActivity() {
                 if (syncAfter) manualSync() else refresh()
             } catch (e: UserRecoverableAuthException) {
                 retrySyncAfterAuth = syncAfter
-                authRecoveryLauncher.launch(e.intent)
+                val recoveryIntent = e.intent
+                if (recoveryIntent != null) {
+                    authRecoveryLauncher.launch(recoveryIntent)
+                } else {
+                    Toast.makeText(this@MainActivity, "Google yetkilendirme ekranı açılamadı", Toast.LENGTH_LONG).show()
+                }
             } catch (e: Exception) {
                 Toast.makeText(this@MainActivity, e.message ?: "Google bağlantı hatası", Toast.LENGTH_LONG).show()
                 refresh()
@@ -282,7 +287,12 @@ class MainActivity : ComponentActivity() {
                 Toast.makeText(this@MainActivity, result.message, Toast.LENGTH_LONG).show()
             } catch (e: UserRecoverableAuthException) {
                 retrySyncAfterAuth = true
-                authRecoveryLauncher.launch(e.intent)
+                val recoveryIntent = e.intent
+                if (recoveryIntent != null) {
+                    authRecoveryLauncher.launch(recoveryIntent)
+                } else {
+                    Toast.makeText(this@MainActivity, "Google yetkilendirme ekranı açılamadı", Toast.LENGTH_LONG).show()
+                }
             } catch (e: Exception) {
                 Toast.makeText(this@MainActivity, e.message ?: "Senkronizasyon hatası", Toast.LENGTH_LONG).show()
             } finally {
