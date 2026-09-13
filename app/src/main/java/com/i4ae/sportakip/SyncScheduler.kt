@@ -14,7 +14,7 @@ object SyncScheduler {
     fun apply(context: Context) {
         val wm = WorkManager.getInstance(context)
         wm.cancelUniqueWork(WORK_NAME)
-        if (!AppPrefs.autoSync(context) || AppPrefs.treeUri(context) == null) return
+        if (!AppPrefs.autoSync(context) || AppPrefs.googleAccount(context).isNullOrBlank()) return
 
         val perDay = AppPrefs.frequencyPerDay(context).coerceIn(1, 8)
         val intervalHours = (24 / perDay).coerceAtLeast(3)
