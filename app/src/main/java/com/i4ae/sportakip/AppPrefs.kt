@@ -1,24 +1,23 @@
 package com.i4ae.sportakip
 
 import android.content.Context
-import android.net.Uri
 
 object AppPrefs {
     private const val PREFS = "spor_takip"
-    private const val KEY_TREE_URI = "tree_uri"
     private const val KEY_AUTO = "auto_sync"
     private const val KEY_FREQ = "freq_per_day"
     private const val KEY_START_HOUR = "start_hour"
     private const val KEY_LAST_SYNC = "last_sync"
     private const val KEY_LAST_STATUS = "last_status"
-    private const val KEY_HISTORY_IMPORTED = "history_imported_v2"
+    private const val KEY_HISTORY_IMPORTED = "history_imported_v3"
+    private const val KEY_GOOGLE_ACCOUNT = "google_account"
 
     private fun prefs(context: Context) = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
 
-    fun treeUri(context: Context): Uri? = prefs(context).getString(KEY_TREE_URI, null)?.let(Uri::parse)
-    fun setTreeUri(context: Context, uri: Uri?) {
+    fun googleAccount(context: Context): String? = prefs(context).getString(KEY_GOOGLE_ACCOUNT, null)
+    fun setGoogleAccount(context: Context, value: String?) {
         prefs(context).edit().apply {
-            if (uri == null) remove(KEY_TREE_URI) else putString(KEY_TREE_URI, uri.toString())
+            if (value.isNullOrBlank()) remove(KEY_GOOGLE_ACCOUNT) else putString(KEY_GOOGLE_ACCOUNT, value)
         }.apply()
     }
 

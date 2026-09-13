@@ -1,7 +1,6 @@
 package com.i4ae.sportakip
 
 import android.content.Context
-import androidx.documentfile.provider.DocumentFile
 import androidx.health.connect.client.HealthConnectClient
 import androidx.health.connect.client.HealthConnectFeatures
 import androidx.health.connect.client.aggregate.AggregateMetric
@@ -42,12 +41,6 @@ object HealthSyncEngine {
         val fullHistory: Boolean = false
     )
 
-    const val AUTO_FILE = "SporTakip_Auto.csv"
-    const val EXERCISE_FILE = "SporTakip_Egzersizler.csv"
-    const val SLEEP_FILE = "SporTakip_Uyku.csv"
-    const val HEART_FILE = "SporTakip_Nabiz.csv"
-    const val MEASUREMENTS_FILE = "SporTakip_Olcumler.csv"
-
     private val stepsPermission = HealthPermission.getReadPermission(StepsRecord::class)
 
     fun dataReadPermissions(): Set<String> = setOf(
@@ -86,10 +79,9 @@ object HealthSyncEngine {
         if (HealthConnectClient.getSdkStatus(context) != HealthConnectClient.SDK_AVAILABLE) {
             return remember(context, false, "Health Connect kullanılamıyor")
         }
-        val treeUri = AppPrefs.treeUri(context)
-            ?: return remember(context, false, "Drive klasörü seçilmedi")
-        val tree = DocumentFile.fromTreeUri(context, treeUri)
-            ?: return remember(context, false, "Drive klasörüne erişilemiyor")
+        if (AppPrefs.googleAccount(context).isNullOrBlank()) {
+            return remember(context, false, "Google hesabı bağlı değil")
+        }
 
         val client = HealthConnectClient.getOrCreate(context)
         val granted = client.permissionController.getGrantedPermissions()
@@ -99,28 +91,120 @@ object HealthSyncEngine {
         val historyFeature = client.features.getFeatureStatus(HealthConnectFeatures.FEATURE_READ_HEALTH_DATA_HISTORY) ==
             HealthConnectFeatures.FEATURE_STATUS_AVAILABLE
         val historyGranted = !historyFeature || HealthPermission.PERMISSION_READ_HEALTH_DATA_HISTORY in granted
-        val firstImport = !AppPrefs.historyImported(context)
         val zone = ZoneId.systemDefault()
         val today = LocalDate.now(zone)
-        val startDate = when {
-            firstImport && historyGranted -> LocalDate.of(2000, 1, 1)
-            firstImport -> today.minusDays(30)
-            else -> today.minusDays(14)
-        }
+        val startDate = if (historyGranted) LocalDate.of(2000, 1, 1) else today.minusDays(30)
         val endDateExclusive = today.plusDays(1)
         val stamp = DateTimeFormatter.ISO_OFFSET_DATE_TIME.format(java.time.ZonedDateTime.now())
 
-        val dailyHeader = "Tarih,Adim,MesafeKm,AktifKaloriKcal,ToplamKaloriKcal,EgzersizDakika,UykuSaat,OrtalamaNabiz,MinNabiz,MaxNabiz,DinlenikNabiz,KiloKg,VucutYagYuzde,VO2Max,SuLitre,CikilanKat,YukselisMetre,Kaynak,SonSenkronizasyon"
-        val heartHeader = "Tarih,OrtalamaNabiz,MinNabiz,MaxNabiz,DinlenikNabiz,Kaynak,SonSenkronizasyon"
-        val exerciseHeader = "RecordId,Tarih,Baslangic,Bitis,TurKodu,Baslik,SureDakika,Not,Kaynak,SonSenkronizasyon"
-        val sleepHeader = "RecordId,Tarih,Baslangic,Bitis,SureDakika,Kaynak,SonSenkronizasyon"
-        val measurementsHeader = "RecordId,TarihSaat,KiloKg,VucutYagYuzde,VO2Max,Kaynak,SonSenkronizasyon"
+        val gunluk = mutableListOf<List<Any?>>()
+        val egzersizler = mutableListOf<List<Any?>>()
+        val uyku = mutableListOf<List<Any?>>()
+        val nabiz = mutableListOf<List<Any?>>()
+        val olcumler = mutableListOf<List<Any?>>()
 
-        val dailyRows = if (firstImport && historyGranted) mutableMapOf() else readExisting(tree, context, AUTO_FILE, dailyHeader, 0)
-        val heartRows = if (firstImport && historyGranted) mutableMapOf() else readExisting(tree, context, HEART_FILE, heartHeader, 0)
-        val exerciseRows = if (firstImport && historyGranted) mutableMapOf() else readExisting(tree, context, EXERCISE_FILE, exerciseHeader, 0)
-        val sleepRows = if (firstImport && historyGranted) mutableMapOf() else readExisting(tree, context, SLEEP_FILE, sleepHeader, 0)
-        val measurementRows = if (firstImport && historyGranted) mutableMapOf() else readExisting(tree, context, MEASUREMENTS_FILE, measurementsHeader, 0)
+        gunluk += listOf(
+            "Tarih", "Adım", "Mesafe (km)", "Aktif Kalori (kcal)", "Toplam Kalori (kcal)",
+            "Egzersiz Süresi (dk)", "Uyku (saat)", "Ortalama Nabız (bpm)", "Min Nabız (bpm)",
+            "Maks. Nabız (bpm)", "Dinlenik Nabız (bpm)", "Kilo (kg)", "Vücut Yağ (%)", "VO2 Max",
+            "Su (L)", "Çıkılan Kat", "Yükseliş (m)", "Kaynak", "Son Senkronizasyon"
+        )
+        egzersizler += listOf(
+            "Başlangıç", "Bitiş", "Tür Kodu", "Başlık", "Süre (dk)", "Mesafe (km)",
+            "Kalori (kcal)", "Adım", "Ortalama Nabız (bpm)", "Maks. Nabız (bpm)",
+            "Kaynak", "Kayıt ID", "Son Senkronizasyon"
+        )
+        uyku += listOf("Başlangıç", "Bitiş", "Süre (saat)", "Aşama", "Kaynak", "Kayıt ID", "Son Senkronizasyon", "Tarih")
+        nabiz += listOf("Tarih", "Ortalama Nabız (bpm)", "Min Nabız (bpm)", "Maks. Nabız (bpm)", "Dinlenik Nabız (bpm)", "Kaynak", "Son Senkronizasyon", "Not")
+        olcumler += listOf("Zaman", "Kilo (kg)", "Vücut Yağ (%)", "VO2 Max", "Kaynak", "Kayıt ID", "Son Senkronizasyon", "Tür")
+
+        val instantStart = startDate.atStartOfDay(zone).toInstant()
+        val instantEnd = endDateExclusive.atStartOfDay(zone).toInstant()
+        val instantFilter = TimeRangeFilter.between(instantStart, instantEnd)
+
+        data class Extra(var bodyFat: Double? = null, var vo2: Double? = null)
+        val extras = mutableMapOf<LocalDate, Extra>()
+
+        if (HealthPermission.getReadPermission(WeightRecord::class) in grantedData) {
+            readAll<WeightRecord>(client, instantFilter)
+                .sortedBy { it.time }
+                .forEach { r ->
+                    olcumler += listOf(isoTime(r.time, zone), round2(r.weight.inKilograms), null, null, "HealthConnect", r.metadata.id, stamp, "Kilo")
+                }
+        }
+        if (HealthPermission.getReadPermission(BodyFatRecord::class) in grantedData) {
+            readAll<BodyFatRecord>(client, instantFilter)
+                .sortedBy { it.time }
+                .forEach { r ->
+                    val value = r.percentage.value
+                    extras.getOrPut(r.time.atZone(zone).toLocalDate()) { Extra() }.bodyFat = value
+                    olcumler += listOf(isoTime(r.time, zone), null, round2(value), null, "HealthConnect", r.metadata.id, stamp, "Vücut Yağı")
+                }
+        }
+        if (HealthPermission.getReadPermission(Vo2MaxRecord::class) in grantedData) {
+            readAll<Vo2MaxRecord>(client, instantFilter)
+                .sortedBy { it.time }
+                .forEach { r ->
+                    val value = r.vo2MillilitersPerMinuteKilogram
+                    extras.getOrPut(r.time.atZone(zone).toLocalDate()) { Extra() }.vo2 = value
+                    olcumler += listOf(isoTime(r.time, zone), null, null, round2(value), "HealthConnect", r.metadata.id, stamp, "VO2 Max")
+                }
+        }
+
+        if (HealthPermission.getReadPermission(SleepSessionRecord::class) in grantedData) {
+            readAll<SleepSessionRecord>(client, instantFilter)
+                .sortedBy { it.startTime }
+                .forEach { r ->
+                    uyku += listOf(
+                        isoTime(r.startTime, zone),
+                        isoTime(r.endTime, zone),
+                        round2(Duration.between(r.startTime, r.endTime).toMinutes() / 60.0),
+                        "Oturum",
+                        "HealthConnect",
+                        r.metadata.id,
+                        stamp,
+                        r.startTime.atZone(zone).toLocalDate().toString()
+                    )
+                }
+        }
+
+        val exerciseMetrics = linkedSetOf<AggregateMetric<*>>()
+        if (HealthPermission.getReadPermission(StepsRecord::class) in grantedData) exerciseMetrics += StepsRecord.COUNT_TOTAL
+        if (HealthPermission.getReadPermission(DistanceRecord::class) in grantedData) exerciseMetrics += DistanceRecord.DISTANCE_TOTAL
+        if (HealthPermission.getReadPermission(ActiveCaloriesBurnedRecord::class) in grantedData) exerciseMetrics += ActiveCaloriesBurnedRecord.ACTIVE_CALORIES_TOTAL
+        if (HealthPermission.getReadPermission(HeartRateRecord::class) in grantedData) {
+            exerciseMetrics += HeartRateRecord.BPM_AVG
+            exerciseMetrics += HeartRateRecord.BPM_MAX
+        }
+        if (HealthPermission.getReadPermission(ExerciseSessionRecord::class) in grantedData) {
+            readAll<ExerciseSessionRecord>(client, instantFilter)
+                .sortedBy { it.startTime }
+                .forEach { r ->
+                    val agg = if (exerciseMetrics.isNotEmpty()) {
+                        client.aggregate(
+                            AggregateRequest(
+                                metrics = exerciseMetrics,
+                                timeRangeFilter = TimeRangeFilter.between(r.startTime, r.endTime)
+                            )
+                        )
+                    } else null
+                    egzersizler += listOf(
+                        isoTime(r.startTime, zone),
+                        isoTime(r.endTime, zone),
+                        r.exerciseType,
+                        r.title ?: "",
+                        Duration.between(r.startTime, r.endTime).toMinutes(),
+                        agg?.get(DistanceRecord.DISTANCE_TOTAL)?.inKilometers?.let(::round2),
+                        agg?.get(ActiveCaloriesBurnedRecord.ACTIVE_CALORIES_TOTAL)?.inKilocalories?.let(::round2),
+                        agg?.get(StepsRecord.COUNT_TOTAL),
+                        agg?.get(HeartRateRecord.BPM_AVG),
+                        agg?.get(HeartRateRecord.BPM_MAX),
+                        "HealthConnect",
+                        r.metadata.id,
+                        stamp
+                    )
+                }
+        }
 
         val dailyMetrics = linkedSetOf<AggregateMetric<*>>()
         if (HealthPermission.getReadPermission(StepsRecord::class) in grantedData) dailyMetrics += StepsRecord.COUNT_TOTAL
@@ -140,89 +224,6 @@ object HealthSyncEngine {
         if (HealthPermission.getReadPermission(FloorsClimbedRecord::class) in grantedData) dailyMetrics += FloorsClimbedRecord.FLOORS_CLIMBED_TOTAL
         if (HealthPermission.getReadPermission(ElevationGainedRecord::class) in grantedData) dailyMetrics += ElevationGainedRecord.ELEVATION_GAINED_TOTAL
 
-        data class Extra(var bodyFat: Double? = null, var vo2: Double? = null)
-        val extras = mutableMapOf<LocalDate, Extra>()
-
-        val instantStart = startDate.atStartOfDay(zone).toInstant()
-        val instantEnd = endDateExclusive.atStartOfDay(zone).toInstant()
-        val instantFilter = TimeRangeFilter.between(instantStart, instantEnd)
-
-        if (HealthPermission.getReadPermission(BodyFatRecord::class) in grantedData) {
-            readAll<BodyFatRecord>(client, instantFilter).forEach { r ->
-                val date = r.time.atZone(zone).toLocalDate()
-                extras.getOrPut(date) { Extra() }.bodyFat = r.percentage.value
-                measurementRows[r.metadata.id] = csvLine(
-                    r.metadata.id,
-                    isoTime(r.time, zone),
-                    "",
-                    fmt(r.percentage.value),
-                    "",
-                    "HealthConnect",
-                    stamp
-                )
-            }
-        }
-        if (HealthPermission.getReadPermission(Vo2MaxRecord::class) in grantedData) {
-            readAll<Vo2MaxRecord>(client, instantFilter).forEach { r ->
-                val date = r.time.atZone(zone).toLocalDate()
-                extras.getOrPut(date) { Extra() }.vo2 = r.vo2MillilitersPerMinuteKilogram
-                measurementRows[r.metadata.id] = csvLine(
-                    r.metadata.id,
-                    isoTime(r.time, zone),
-                    "",
-                    "",
-                    fmt(r.vo2MillilitersPerMinuteKilogram),
-                    "HealthConnect",
-                    stamp
-                )
-            }
-        }
-        if (HealthPermission.getReadPermission(WeightRecord::class) in grantedData) {
-            readAll<WeightRecord>(client, instantFilter).forEach { r ->
-                measurementRows[r.metadata.id] = csvLine(
-                    r.metadata.id,
-                    isoTime(r.time, zone),
-                    fmt(r.weight.inKilograms),
-                    "",
-                    "",
-                    "HealthConnect",
-                    stamp
-                )
-            }
-        }
-
-        if (HealthPermission.getReadPermission(ExerciseSessionRecord::class) in grantedData) {
-            readAll<ExerciseSessionRecord>(client, instantFilter).forEach { r ->
-                val date = r.startTime.atZone(zone).toLocalDate()
-                exerciseRows[r.metadata.id] = csvLine(
-                    r.metadata.id,
-                    date,
-                    isoTime(r.startTime, zone),
-                    isoTime(r.endTime, zone),
-                    r.exerciseType,
-                    r.title ?: "",
-                    Duration.between(r.startTime, r.endTime).toMinutes(),
-                    r.notes ?: "",
-                    "HealthConnect",
-                    stamp
-                )
-            }
-        }
-        if (HealthPermission.getReadPermission(SleepSessionRecord::class) in grantedData) {
-            readAll<SleepSessionRecord>(client, instantFilter).forEach { r ->
-                val date = r.startTime.atZone(zone).toLocalDate()
-                sleepRows[r.metadata.id] = csvLine(
-                    r.metadata.id,
-                    date,
-                    isoTime(r.startTime, zone),
-                    isoTime(r.endTime, zone),
-                    Duration.between(r.startTime, r.endTime).toMinutes(),
-                    "HealthConnect",
-                    stamp
-                )
-            }
-        }
-
         var todaySteps = 0L
         if (dailyMetrics.isNotEmpty()) {
             val grouped = client.aggregateGroupByPeriod(
@@ -232,60 +233,64 @@ object HealthSyncEngine {
                     timeRangeSlicer = Period.ofDays(1)
                 )
             )
-            for (bucket in grouped) {
+            grouped.sortedBy { it.startTime }.forEach { bucket ->
                 val date = bucket.startTime.toLocalDate()
                 val r = bucket.result
                 val steps = r[StepsRecord.COUNT_TOTAL]
                 if (date == today) todaySteps = steps ?: 0L
                 val extra = extras[date]
-                dailyRows[date.toString()] = csvLine(
-                    date,
-                    steps ?: "",
-                    r[DistanceRecord.DISTANCE_TOTAL]?.inKilometers?.let(::fmt) ?: "",
-                    r[ActiveCaloriesBurnedRecord.ACTIVE_CALORIES_TOTAL]?.inKilocalories?.let(::fmt) ?: "",
-                    r[TotalCaloriesBurnedRecord.ENERGY_TOTAL]?.inKilocalories?.let(::fmt) ?: "",
-                    r[ExerciseSessionRecord.EXERCISE_DURATION_TOTAL]?.toMinutes() ?: "",
-                    r[SleepSessionRecord.SLEEP_DURATION_TOTAL]?.toMinutes()?.div(60.0)?.let(::fmt) ?: "",
-                    r[HeartRateRecord.BPM_AVG] ?: "",
-                    r[HeartRateRecord.BPM_MIN] ?: "",
-                    r[HeartRateRecord.BPM_MAX] ?: "",
-                    r[RestingHeartRateRecord.BPM_AVG] ?: "",
-                    r[WeightRecord.WEIGHT_AVG]?.inKilograms?.let(::fmt) ?: "",
-                    extra?.bodyFat?.let(::fmt) ?: "",
-                    extra?.vo2?.let(::fmt) ?: "",
-                    r[HydrationRecord.VOLUME_TOTAL]?.inLiters?.let(::fmt) ?: "",
-                    r[FloorsClimbedRecord.FLOORS_CLIMBED_TOTAL]?.let(::fmt) ?: "",
-                    r[ElevationGainedRecord.ELEVATION_GAINED_TOTAL]?.inMeters?.let(::fmt) ?: "",
+                gunluk += listOf(
+                    date.toString(),
+                    steps,
+                    r[DistanceRecord.DISTANCE_TOTAL]?.inKilometers?.let(::round2),
+                    r[ActiveCaloriesBurnedRecord.ACTIVE_CALORIES_TOTAL]?.inKilocalories?.let(::round2),
+                    r[TotalCaloriesBurnedRecord.ENERGY_TOTAL]?.inKilocalories?.let(::round2),
+                    r[ExerciseSessionRecord.EXERCISE_DURATION_TOTAL]?.toMinutes(),
+                    r[SleepSessionRecord.SLEEP_DURATION_TOTAL]?.toMinutes()?.div(60.0)?.let(::round2),
+                    r[HeartRateRecord.BPM_AVG],
+                    r[HeartRateRecord.BPM_MIN],
+                    r[HeartRateRecord.BPM_MAX],
+                    r[RestingHeartRateRecord.BPM_AVG],
+                    r[WeightRecord.WEIGHT_AVG]?.inKilograms?.let(::round2),
+                    extra?.bodyFat?.let(::round2),
+                    extra?.vo2?.let(::round2),
+                    r[HydrationRecord.VOLUME_TOTAL]?.inLiters?.let(::round2),
+                    r[FloorsClimbedRecord.FLOORS_CLIMBED_TOTAL]?.let(::round2),
+                    r[ElevationGainedRecord.ELEVATION_GAINED_TOTAL]?.inMeters?.let(::round2),
                     "HealthConnect",
                     stamp
                 )
-                heartRows[date.toString()] = csvLine(
-                    date,
-                    r[HeartRateRecord.BPM_AVG] ?: "",
-                    r[HeartRateRecord.BPM_MIN] ?: "",
-                    r[HeartRateRecord.BPM_MAX] ?: "",
-                    r[RestingHeartRateRecord.BPM_AVG] ?: "",
+                nabiz += listOf(
+                    date.toString(),
+                    r[HeartRateRecord.BPM_AVG],
+                    r[HeartRateRecord.BPM_MIN],
+                    r[HeartRateRecord.BPM_MAX],
+                    r[RestingHeartRateRecord.BPM_AVG],
                     "HealthConnect",
-                    stamp
+                    stamp,
+                    "Günlük özet"
                 )
             }
         }
 
-        writeCsv(tree, context, AUTO_FILE, dailyHeader, dailyRows)
-        writeCsv(tree, context, HEART_FILE, heartHeader, heartRows)
-        writeCsv(tree, context, EXERCISE_FILE, exerciseHeader, exerciseRows)
-        writeCsv(tree, context, SLEEP_FILE, sleepHeader, sleepRows)
-        writeCsv(tree, context, MEASUREMENTS_FILE, measurementsHeader, measurementRows)
+        GoogleSheetsClient.replaceAll(
+            context,
+            linkedMapOf(
+                "Gunluk" to gunluk,
+                "Egzersizler" to egzersizler,
+                "Uyku" to uyku,
+                "Nabiz" to nabiz,
+                "Olcumler" to olcumler
+            )
+        )
 
-        if (firstImport && historyGranted) AppPrefs.setHistoryImported(context, true)
-        val full = !firstImport || historyGranted
-        val permissionCount = grantedData.size
-        val msg = when {
-            firstImport && historyGranted -> "Tüm geçmiş senkronize edildi ($permissionCount veri izni)"
-            firstImport -> "Geçmiş izni verilmedi; son 30 gün senkronize edildi"
-            else -> "Senkronizasyon başarılı"
+        if (historyGranted) AppPrefs.setHistoryImported(context, true)
+        val msg = if (historyGranted) {
+            "Google Sheet güncellendi; tüm geçmiş senkronize edildi"
+        } else {
+            "Google Sheet güncellendi; geçmiş izni yok, son 30 gün aktarıldı"
         }
-        return remember(context, true, msg, todaySteps, full)
+        return remember(context, true, msg, todaySteps, historyGranted)
     }
 
     private suspend inline fun <reified T : Record> readAll(
@@ -309,75 +314,7 @@ object HealthSyncEngine {
         return out
     }
 
-    private fun readExisting(
-        tree: DocumentFile,
-        context: Context,
-        fileName: String,
-        expectedHeader: String,
-        keyColumn: Int
-    ): MutableMap<String, String> {
-        val rows = mutableMapOf<String, String>()
-        val file = tree.findFile(fileName) ?: return rows
-        try {
-            context.contentResolver.openInputStream(file.uri)?.bufferedReader()?.use { reader ->
-                val header = reader.readLine() ?: return@use
-                if (header != expectedHeader) return@use
-                reader.lineSequence().filter { it.isNotBlank() }.forEach { line ->
-                    val cols = parseCsv(line)
-                    if (cols.size > keyColumn && cols[keyColumn].isNotBlank()) rows[cols[keyColumn]] = line
-                }
-            }
-        } catch (_: Exception) {
-        }
-        return rows
-    }
-
-    private fun writeCsv(
-        tree: DocumentFile,
-        context: Context,
-        fileName: String,
-        header: String,
-        rows: Map<String, String>
-    ) {
-        val file = tree.findFile(fileName) ?: tree.createFile("text/csv", fileName)
-            ?: throw IllegalStateException("$fileName oluşturulamadı")
-        val output = buildString {
-            appendLine(header)
-            rows.toSortedMap().forEach { (_, line) -> appendLine(line) }
-        }
-        context.contentResolver.openOutputStream(file.uri, "wt")?.bufferedWriter()?.use { it.write(output) }
-            ?: throw IllegalStateException("$fileName yazılamadı")
-    }
-
-    private fun parseCsv(line: String): List<String> {
-        val out = mutableListOf<String>()
-        val current = StringBuilder()
-        var quoted = false
-        var i = 0
-        while (i < line.length) {
-            val c = line[i]
-            when {
-                c == '"' && quoted && i + 1 < line.length && line[i + 1] == '"' -> {
-                    current.append('"'); i++
-                }
-                c == '"' -> quoted = !quoted
-                c == ',' && !quoted -> { out += current.toString(); current.clear() }
-                else -> current.append(c)
-            }
-            i++
-        }
-        out += current.toString()
-        return out
-    }
-
-    private fun csvLine(vararg values: Any?): String = values.joinToString(",") { csv(it?.toString() ?: "") }
-
-    private fun csv(value: String): String {
-        if (value.none { it == ',' || it == '"' || it == '\n' || it == '\r' }) return value
-        return "\"${value.replace("\"", "\"\"")}\""
-    }
-
-    private fun fmt(value: Double): String = String.format(Locale.US, "%.2f", value)
+    private fun round2(value: Double): Double = String.format(Locale.US, "%.2f", value).toDouble()
 
     private fun isoTime(instant: Instant, zone: ZoneId): String =
         DateTimeFormatter.ISO_OFFSET_DATE_TIME.format(instant.atZone(zone))
