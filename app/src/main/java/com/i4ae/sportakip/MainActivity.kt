@@ -1,5 +1,7 @@
 package com.i4ae.sportakip
 
+import android.accounts.AccountManager
+import android.app.Activity
 import android.content.Intent
 import android.graphics.Color
 import android.graphics.Typeface
@@ -17,6 +19,8 @@ import androidx.health.connect.client.HealthConnectFeatures
 import androidx.health.connect.client.PermissionController
 import androidx.health.connect.client.permission.HealthPermission
 import androidx.lifecycle.lifecycleScope
+import com.google.android.gms.auth.GoogleAuthUtil
+import com.google.android.gms.auth.UserRecoverableAuthException
 import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
@@ -27,8 +31,9 @@ class MainActivity : ComponentActivity() {
     private lateinit var autoSwitch: Switch
     private lateinit var freqSpinner: Spinner
     private lateinit var hourSpinner: Spinner
-    private lateinit var driveButton: Button
+    private lateinit var googleButton: Button
     private lateinit var syncButton: Button
+    private var retrySyncAfterAuth = false
 
     private val bgRead = HealthPermission.PERMISSION_READ_HEALTH_DATA_IN_BACKGROUND
     private val historyRead = HealthPermission.PERMISSION_READ_HEALTH_DATA_HISTORY
@@ -37,17 +42,30 @@ class MainActivity : ComponentActivity() {
         PermissionController.createRequestPermissionResultContract()
     ) { refresh() }
 
-    private val folderLauncher = registerForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri: Uri? ->
-        if (uri != null) {
-            try {
-                contentResolver.takePersistableUriPermission(
-                    uri,
-                    Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
-                )
-            } catch (_: Exception) {}
-            AppPrefs.setTreeUri(this, uri)
+    private val accountLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+        if (result.resultCode == Activity.RESULT_OK) {
+            val accountName = result.data?.getStringExtra(AccountManager.KEY_ACCOUNT_NAME)
+            if (!accountName.isNullOrBlank()) {
+                AppPrefs.setGoogleAccount(this, accountName)
+                authorizeGoogle(false)
+            }
+        }
+        refresh()
+    }
+
+    private val authRecoveryLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+        if (result.resultCode == Activity.RESULT_OK) {
             SyncScheduler.apply(this)
-            refresh()
+            if (retrySyncAfterAuth) {
+                retrySyncAfterAuth = false
+                manualSync()
+            } else {
+                Toast.makeText(this, "Google Sheet erişimi verildi", Toast.LENGTH_SHORT).show()
+                refresh()
+            }
+        } else {
+            retrySyncAfterAuth = false
+            Toast.makeText(this, "Google Sheet erişimi verilmedi", Toast.LENGTH_SHORT).show()
         }
     }
 
@@ -77,7 +95,7 @@ class MainActivity : ComponentActivity() {
             setTypeface(typeface, Typeface.BOLD)
         })
         root.addView(TextView(this).apply {
-            text = "Health Connect → Google Drive"
+            text = "Health Connect → Spor Takip Verileri (Google Sheet)"
             textSize = 15f
             setTextColor(Color.DKGRAY)
             setPadding(0, dp(2), 0, dp(16))
@@ -107,11 +125,18 @@ class MainActivity : ComponentActivity() {
             setOnClickListener { requestHealthPermissions() }
         })
 
-        driveButton = Button(this).apply {
-            text = "Google Drive klasörünü seç"
-            setOnClickListener { folderLauncher.launch(AppPrefs.treeUri(this@MainActivity)) }
+        googleButton = Button(this).apply {
+            text = "Google hesabını bağla"
+            setOnClickListener { chooseGoogleAccount() }
         }
-        root.addView(driveButton)
+        root.addView(googleButton)
+
+        root.addView(Button(this).apply {
+            text = "Spor Takip Verileri Google Sheet'ini aç"
+            setOnClickListener {
+                startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(GoogleSheetsClient.SPREADSHEET_URL)))
+            }
+        })
 
         syncButton = Button(this).apply {
             text = "Şimdi senkronize et"
@@ -120,7 +145,7 @@ class MainActivity : ComponentActivity() {
         root.addView(syncButton)
 
         root.addView(TextView(this).apply {
-            text = "Aktarılanlar: adım, mesafe, aktif/toplam kalori, egzersiz/kardiyo, uyku, nabız, dinlenik nabız, kilo, vücut yağı, VO₂ max, su, kat ve yükselti."
+            text = "Aktarılanlar: adım, mesafe, aktif/toplam kalori, egzersiz ve kardiyo oturumları, uyku, nabız, dinlenik nabız, kilo, vücut yağı, VO₂ max, su, kat ve yükselti. CSV oluşturulmaz; veriler doğrudan Google Sheet'e yazılır."
             textSize = 13f
             setPadding(0, dp(8), 0, dp(12))
         })
@@ -164,24 +189,16 @@ class MainActivity : ComponentActivity() {
         root.addView(horizontalLabel("İlk senkronizasyon saati", hourSpinner))
 
         root.addView(Button(this).apply {
-            text = "Drive bağlantısını kaldır"
+            text = "Google hesabı bağlantısını kaldır"
             setOnClickListener {
-                AppPrefs.treeUri(this@MainActivity)?.let { uri ->
-                    try {
-                        contentResolver.releasePersistableUriPermission(
-                            uri,
-                            Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
-                        )
-                    } catch (_: Exception) {}
-                }
-                AppPrefs.setTreeUri(this@MainActivity, null)
+                AppPrefs.setGoogleAccount(this@MainActivity, null)
                 SyncScheduler.apply(this@MainActivity)
                 refresh()
             }
         })
 
         root.addView(TextView(this).apply {
-            text = "İlk başarılı senkronizasyonda geçmiş okuma izni verilmişse Health Connect'teki tüm geçmiş alınır. Sonraki senkronizasyonlarda son günler güncellenir. Android pil tasarrufu otomatik çalışmayı birkaç dakika geciktirebilir."
+            text = "İlk kullanımda Health Connect geçmiş erişimini ve Google Sheet erişimini onayla. Geçmiş erişimi verilmişse tüm mevcut geçmiş Sheet'e aktarılır. Android pil tasarrufu otomatik çalışmayı birkaç dakika geciktirebilir."
             textSize = 12f
             setPadding(0, dp(14), 0, 0)
         })
@@ -197,6 +214,36 @@ class MainActivity : ComponentActivity() {
             textSize = 15f
         }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
         addView(control)
+    }
+
+    private fun chooseGoogleAccount() {
+        val intent = AccountManager.newChooseAccountIntent(
+            null,
+            null,
+            arrayOf(GoogleAuthUtil.GOOGLE_ACCOUNT_TYPE),
+            null,
+            null,
+            null,
+            null
+        )
+        accountLauncher.launch(intent)
+    }
+
+    private fun authorizeGoogle(syncAfter: Boolean) {
+        lifecycleScope.launch {
+            try {
+                GoogleSheetsClient.ensureAuthorized(this@MainActivity)
+                SyncScheduler.apply(this@MainActivity)
+                Toast.makeText(this@MainActivity, "Google Sheet bağlantısı hazır", Toast.LENGTH_SHORT).show()
+                if (syncAfter) manualSync() else refresh()
+            } catch (e: UserRecoverableAuthException) {
+                retrySyncAfterAuth = syncAfter
+                authRecoveryLauncher.launch(e.intent)
+            } catch (e: Exception) {
+                Toast.makeText(this@MainActivity, e.message ?: "Google bağlantı hatası", Toast.LENGTH_LONG).show()
+                refresh()
+            }
+        }
     }
 
     private fun requestHealthPermissions() {
@@ -222,15 +269,26 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun manualSync() {
+        if (AppPrefs.googleAccount(this).isNullOrBlank()) {
+            Toast.makeText(this, "Önce Google hesabını bağla", Toast.LENGTH_SHORT).show()
+            chooseGoogleAccount()
+            return
+        }
         lifecycleScope.launch {
             status.text = "Senkronize ediliyor… İlk tam aktarım biraz sürebilir."
             syncButton.isEnabled = false
-            val result = try { HealthSyncEngine.sync(this@MainActivity) } catch (e: Exception) {
-                HealthSyncEngine.Result(false, e.message ?: "Hata")
+            try {
+                val result = HealthSyncEngine.sync(this@MainActivity)
+                Toast.makeText(this@MainActivity, result.message, Toast.LENGTH_LONG).show()
+            } catch (e: UserRecoverableAuthException) {
+                retrySyncAfterAuth = true
+                authRecoveryLauncher.launch(e.intent)
+            } catch (e: Exception) {
+                Toast.makeText(this@MainActivity, e.message ?: "Senkronizasyon hatası", Toast.LENGTH_LONG).show()
+            } finally {
+                syncButton.isEnabled = true
+                refresh()
             }
-            syncButton.isEnabled = true
-            Toast.makeText(this@MainActivity, result.message, Toast.LENGTH_LONG).show()
-            refresh()
         }
     }
 
@@ -241,12 +299,13 @@ class MainActivity : ComponentActivity() {
             HealthConnectClient.SDK_UNAVAILABLE_PROVIDER_UPDATE_REQUIRED -> "Health Connect: güncelleme gerekli"
             else -> "Health Connect: kullanılamıyor"
         }
-        val driveText = if (AppPrefs.treeUri(this) == null) "Drive: klasör seçilmedi" else "Drive: bağlı (5 veri dosyası)"
-        status.text = "$sdkText\n$driveText"
-        driveButton.text = if (AppPrefs.treeUri(this) == null) "Google Drive klasörünü seç" else "Drive klasörünü değiştir"
+        val account = AppPrefs.googleAccount(this)
+        val sheetText = if (account.isNullOrBlank()) "Google Sheet: hesap bağlanmadı" else "Google Sheet: bağlı ($account)"
+        status.text = "$sdkText\n$sheetText"
+        googleButton.text = if (account.isNullOrBlank()) "Google hesabını bağla" else "Google hesabını değiştir"
         autoSwitch.isChecked = AppPrefs.autoSync(this)
         lastSync.text = "Son senkronizasyon: ${AppPrefs.lastSync(this)} — ${AppPrefs.lastStatus(this)}"
-        historyStatus.text = if (AppPrefs.historyImported(this)) "✓ Tüm geçmiş ilk aktarımı tamamlandı" else "İlk aktarım: tüm geçmiş bekliyor"
+        historyStatus.text = if (AppPrefs.historyImported(this)) "✓ Tüm geçmiş erişimi aktif" else "Geçmiş erişimi: ilk tam aktarım bekliyor"
 
         if (sdk == HealthConnectClient.SDK_AVAILABLE) {
             lifecycleScope.launch {
