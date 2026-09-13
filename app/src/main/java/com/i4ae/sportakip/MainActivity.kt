@@ -1,6 +1,7 @@
 package com.i4ae.sportakip
 
 import android.content.Intent
+import android.graphics.Color
 import android.graphics.Typeface
 import android.net.Uri
 import android.os.Bundle
@@ -15,7 +16,6 @@ import androidx.health.connect.client.HealthConnectClient
 import androidx.health.connect.client.HealthConnectFeatures
 import androidx.health.connect.client.PermissionController
 import androidx.health.connect.client.permission.HealthPermission
-import androidx.health.connect.client.records.StepsRecord
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.launch
 
@@ -23,13 +23,15 @@ class MainActivity : ComponentActivity() {
     private lateinit var status: TextView
     private lateinit var steps: TextView
     private lateinit var lastSync: TextView
+    private lateinit var historyStatus: TextView
     private lateinit var autoSwitch: Switch
     private lateinit var freqSpinner: Spinner
     private lateinit var hourSpinner: Spinner
     private lateinit var driveButton: Button
+    private lateinit var syncButton: Button
 
-    private val readSteps = HealthPermission.getReadPermission(StepsRecord::class)
     private val bgRead = HealthPermission.PERMISSION_READ_HEALTH_DATA_IN_BACKGROUND
+    private val historyRead = HealthPermission.PERMISSION_READ_HEALTH_DATA_HISTORY
 
     private val permissionLauncher = registerForActivityResult(
         PermissionController.createRequestPermissionResultContract()
@@ -61,7 +63,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun buildUi(): View {
-        val scroll = ScrollView(this)
+        val scroll = ScrollView(this).apply { setBackgroundColor(Color.rgb(247, 250, 248)) }
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(20))
@@ -70,25 +72,34 @@ class MainActivity : ComponentActivity() {
 
         root.addView(TextView(this).apply {
             text = "Spor Takip"
-            textSize = 28f
+            textSize = 30f
+            setTextColor(Color.rgb(0, 92, 58))
             setTypeface(typeface, Typeface.BOLD)
         })
         root.addView(TextView(this).apply {
             text = "Health Connect → Google Drive"
             textSize = 15f
-            setPadding(0, dp(2), 0, dp(18))
+            setTextColor(Color.DKGRAY)
+            setPadding(0, dp(2), 0, dp(16))
         })
 
-        status = TextView(this).apply { textSize = 16f }
+        status = TextView(this).apply { textSize = 15f }
         steps = TextView(this).apply {
-            textSize = 32f
+            textSize = 34f
+            setTextColor(Color.rgb(0, 110, 65))
             setTypeface(typeface, Typeface.BOLD)
             gravity = Gravity.CENTER_HORIZONTAL
-            setPadding(0, dp(18), 0, dp(6))
+            setPadding(0, dp(20), 0, dp(6))
+        }
+        historyStatus = TextView(this).apply {
+            textSize = 13f
+            gravity = Gravity.CENTER_HORIZONTAL
+            setPadding(0, 0, 0, dp(8))
         }
         lastSync = TextView(this).apply { textSize = 14f; setPadding(0, 0, 0, dp(14)) }
         root.addView(status)
         root.addView(steps)
+        root.addView(historyStatus)
         root.addView(lastSync)
 
         root.addView(Button(this).apply {
@@ -102,9 +113,16 @@ class MainActivity : ComponentActivity() {
         }
         root.addView(driveButton)
 
-        root.addView(Button(this).apply {
+        syncButton = Button(this).apply {
             text = "Şimdi senkronize et"
             setOnClickListener { manualSync() }
+        }
+        root.addView(syncButton)
+
+        root.addView(TextView(this).apply {
+            text = "Aktarılanlar: adım, mesafe, aktif/toplam kalori, egzersiz/kardiyo, uyku, nabız, dinlenik nabız, kilo, vücut yağı, VO₂ max, su, kat ve yükselti."
+            textSize = 13f
+            setPadding(0, dp(8), 0, dp(12))
         })
 
         root.addView(horizontalLabel("Otomatik senkronizasyon", Switch(this).also { sw ->
@@ -149,7 +167,12 @@ class MainActivity : ComponentActivity() {
             text = "Drive bağlantısını kaldır"
             setOnClickListener {
                 AppPrefs.treeUri(this@MainActivity)?.let { uri ->
-                    try { contentResolver.releasePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION) } catch (_: Exception) {}
+                    try {
+                        contentResolver.releasePersistableUriPermission(
+                            uri,
+                            Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+                        )
+                    } catch (_: Exception) {}
                 }
                 AppPrefs.setTreeUri(this@MainActivity, null)
                 SyncScheduler.apply(this@MainActivity)
@@ -158,7 +181,7 @@ class MainActivity : ComponentActivity() {
         })
 
         root.addView(TextView(this).apply {
-            text = "Not: Android, pil tasarrufu nedeniyle otomatik senkronizasyonu seçilen saatten birkaç dakika geciktirebilir."
+            text = "İlk başarılı senkronizasyonda geçmiş okuma izni verilmişse Health Connect'teki tüm geçmiş alınır. Sonraki senkronizasyonlarda son günler güncellenir. Android pil tasarrufu otomatik çalışmayı birkaç dakika geciktirebilir."
             textSize = 12f
             setPadding(0, dp(14), 0, 0)
         })
@@ -187,9 +210,12 @@ class MainActivity : ComponentActivity() {
         }
         lifecycleScope.launch {
             val client = HealthConnectClient.getOrCreate(this@MainActivity)
-            val requested = mutableSetOf(readSteps)
+            val requested = HealthSyncEngine.dataReadPermissions().toMutableSet()
             if (client.features.getFeatureStatus(HealthConnectFeatures.FEATURE_READ_HEALTH_DATA_IN_BACKGROUND) == HealthConnectFeatures.FEATURE_STATUS_AVAILABLE) {
                 requested += bgRead
+            }
+            if (client.features.getFeatureStatus(HealthConnectFeatures.FEATURE_READ_HEALTH_DATA_HISTORY) == HealthConnectFeatures.FEATURE_STATUS_AVAILABLE) {
+                requested += historyRead
             }
             permissionLauncher.launch(requested)
         }
@@ -197,11 +223,13 @@ class MainActivity : ComponentActivity() {
 
     private fun manualSync() {
         lifecycleScope.launch {
-            status.text = "Senkronize ediliyor…"
+            status.text = "Senkronize ediliyor… İlk tam aktarım biraz sürebilir."
+            syncButton.isEnabled = false
             val result = try { HealthSyncEngine.sync(this@MainActivity) } catch (e: Exception) {
                 HealthSyncEngine.Result(false, e.message ?: "Hata")
             }
-            Toast.makeText(this@MainActivity, result.message, Toast.LENGTH_SHORT).show()
+            syncButton.isEnabled = true
+            Toast.makeText(this@MainActivity, result.message, Toast.LENGTH_LONG).show()
             refresh()
         }
     }
@@ -213,11 +241,12 @@ class MainActivity : ComponentActivity() {
             HealthConnectClient.SDK_UNAVAILABLE_PROVIDER_UPDATE_REQUIRED -> "Health Connect: güncelleme gerekli"
             else -> "Health Connect: kullanılamıyor"
         }
-        val driveText = if (AppPrefs.treeUri(this) == null) "Drive: klasör seçilmedi" else "Drive: bağlı (${HealthSyncEngine.AUTO_FILE})"
+        val driveText = if (AppPrefs.treeUri(this) == null) "Drive: klasör seçilmedi" else "Drive: bağlı (5 veri dosyası)"
         status.text = "$sdkText\n$driveText"
         driveButton.text = if (AppPrefs.treeUri(this) == null) "Google Drive klasörünü seç" else "Drive klasörünü değiştir"
         autoSwitch.isChecked = AppPrefs.autoSync(this)
         lastSync.text = "Son senkronizasyon: ${AppPrefs.lastSync(this)} — ${AppPrefs.lastStatus(this)}"
+        historyStatus.text = if (AppPrefs.historyImported(this)) "✓ Tüm geçmiş ilk aktarımı tamamlandı" else "İlk aktarım: tüm geçmiş bekliyor"
 
         if (sdk == HealthConnectClient.SDK_AVAILABLE) {
             lifecycleScope.launch {

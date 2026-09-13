@@ -11,6 +11,7 @@ object AppPrefs {
     private const val KEY_START_HOUR = "start_hour"
     private const val KEY_LAST_SYNC = "last_sync"
     private const val KEY_LAST_STATUS = "last_status"
+    private const val KEY_HISTORY_IMPORTED = "history_imported_v2"
 
     private fun prefs(context: Context) = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
 
@@ -35,4 +36,7 @@ object AppPrefs {
     fun setLastResult(context: Context, sync: String, status: String) {
         prefs(context).edit().putString(KEY_LAST_SYNC, sync).putString(KEY_LAST_STATUS, status).apply()
     }
+
+    fun historyImported(context: Context) = prefs(context).getBoolean(KEY_HISTORY_IMPORTED, false)
+    fun setHistoryImported(context: Context, value: Boolean) = prefs(context).edit().putBoolean(KEY_HISTORY_IMPORTED, value).apply()
 }
