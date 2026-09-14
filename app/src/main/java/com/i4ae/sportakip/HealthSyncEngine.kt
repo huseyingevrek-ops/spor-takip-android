@@ -88,12 +88,16 @@ object HealthSyncEngine {
         val grantedData = dataReadPermissions().filterTo(mutableSetOf()) { it in granted }
         if (grantedData.isEmpty()) return remember(context, false, "Health Connect okuma izni verilmedi")
 
-        val historyFeature = client.features.getFeatureStatus(HealthConnectFeatures.FEATURE_READ_HEALTH_DATA_HISTORY) ==
-            HealthConnectFeatures.FEATURE_STATUS_AVAILABLE
-        val historyGranted = !historyFeature || HealthPermission.PERMISSION_READ_HEALTH_DATA_HISTORY in granted
+        val historyFeatureAvailable =
+            client.features.getFeatureStatus(HealthConnectFeatures.FEATURE_READ_HEALTH_DATA_HISTORY) ==
+                HealthConnectFeatures.FEATURE_STATUS_AVAILABLE
+        val historyGranted = historyFeatureAvailable &&
+            HealthPermission.PERMISSION_READ_HEALTH_DATA_HISTORY in granted
+        val fullHistoryScan = historyGranted && !AppPrefs.historyImported(context)
+
         val zone = ZoneId.systemDefault()
         val today = LocalDate.now(zone)
-        val startDate = if (historyGranted) LocalDate.of(2000, 1, 1) else today.minusDays(30)
+        val startDate = if (fullHistoryScan) LocalDate.of(2000, 1, 1) else today.minusDays(30)
         val endDateExclusive = today.plusDays(1)
         val stamp = DateTimeFormatter.ISO_OFFSET_DATE_TIME.format(java.time.ZonedDateTime.now())
 
@@ -114,9 +118,16 @@ object HealthSyncEngine {
             "Kalori (kcal)", "Adım", "Ortalama Nabız (bpm)", "Maks. Nabız (bpm)",
             "Kaynak", "Kayıt ID", "Son Senkronizasyon"
         )
-        uyku += listOf("Başlangıç", "Bitiş", "Süre (saat)", "Aşama", "Kaynak", "Kayıt ID", "Son Senkronizasyon", "Tarih")
-        nabiz += listOf("Tarih", "Ortalama Nabız (bpm)", "Min Nabız (bpm)", "Maks. Nabız (bpm)", "Dinlenik Nabız (bpm)", "Kaynak", "Son Senkronizasyon", "Not")
-        olcumler += listOf("Zaman", "Kilo (kg)", "Vücut Yağ (%)", "VO2 Max", "Kaynak", "Kayıt ID", "Son Senkronizasyon", "Tür")
+        uyku += listOf(
+            "Başlangıç", "Bitiş", "Süre (saat)", "Aşama", "Kaynak", "Kayıt ID", "Son Senkronizasyon", "Tarih"
+        )
+        nabiz += listOf(
+            "Tarih", "Ortalama Nabız (bpm)", "Min Nabız (bpm)", "Maks. Nabız (bpm)",
+            "Dinlenik Nabız (bpm)", "Kaynak", "Son Senkronizasyon", "Not"
+        )
+        olcumler += listOf(
+            "Zaman", "Kilo (kg)", "Vücut Yağ (%)", "VO2 Max", "Kaynak", "Kayıt ID", "Son Senkronizasyon", "Tür"
+        )
 
         val instantStart = startDate.atStartOfDay(zone).toInstant()
         val instantEnd = endDateExclusive.atStartOfDay(zone).toInstant()
@@ -129,25 +140,54 @@ object HealthSyncEngine {
             readAll<WeightRecord>(client, instantFilter)
                 .sortedBy { it.time }
                 .forEach { r ->
-                    olcumler += listOf(isoTime(r.time, zone), round2(r.weight.inKilograms), null, null, "HealthConnect", r.metadata.id, stamp, "Kilo")
+                    olcumler += listOf(
+                        isoTime(r.time, zone),
+                        round2(r.weight.inKilograms),
+                        null,
+                        null,
+                        "HealthConnect",
+                        r.metadata.id,
+                        stamp,
+                        "Kilo"
+                    )
                 }
         }
+
         if (HealthPermission.getReadPermission(BodyFatRecord::class) in grantedData) {
             readAll<BodyFatRecord>(client, instantFilter)
                 .sortedBy { it.time }
                 .forEach { r ->
                     val value = r.percentage.value
                     extras.getOrPut(r.time.atZone(zone).toLocalDate()) { Extra() }.bodyFat = value
-                    olcumler += listOf(isoTime(r.time, zone), null, round2(value), null, "HealthConnect", r.metadata.id, stamp, "Vücut Yağı")
+                    olcumler += listOf(
+                        isoTime(r.time, zone),
+                        null,
+                        round2(value),
+                        null,
+                        "HealthConnect",
+                        r.metadata.id,
+                        stamp,
+                        "Vücut Yağı"
+                    )
                 }
         }
+
         if (HealthPermission.getReadPermission(Vo2MaxRecord::class) in grantedData) {
             readAll<Vo2MaxRecord>(client, instantFilter)
                 .sortedBy { it.time }
                 .forEach { r ->
                     val value = r.vo2MillilitersPerMinuteKilogram
                     extras.getOrPut(r.time.atZone(zone).toLocalDate()) { Extra() }.vo2 = value
-                    olcumler += listOf(isoTime(r.time, zone), null, null, round2(value), "HealthConnect", r.metadata.id, stamp, "VO2 Max")
+                    olcumler += listOf(
+                        isoTime(r.time, zone),
+                        null,
+                        null,
+                        round2(value),
+                        "HealthConnect",
+                        r.metadata.id,
+                        stamp,
+                        "VO2 Max"
+                    )
                 }
         }
 
@@ -169,13 +209,20 @@ object HealthSyncEngine {
         }
 
         val exerciseMetrics = linkedSetOf<AggregateMetric<*>>()
-        if (HealthPermission.getReadPermission(StepsRecord::class) in grantedData) exerciseMetrics += StepsRecord.COUNT_TOTAL
-        if (HealthPermission.getReadPermission(DistanceRecord::class) in grantedData) exerciseMetrics += DistanceRecord.DISTANCE_TOTAL
-        if (HealthPermission.getReadPermission(ActiveCaloriesBurnedRecord::class) in grantedData) exerciseMetrics += ActiveCaloriesBurnedRecord.ACTIVE_CALORIES_TOTAL
+        if (HealthPermission.getReadPermission(StepsRecord::class) in grantedData) {
+            exerciseMetrics += StepsRecord.COUNT_TOTAL
+        }
+        if (HealthPermission.getReadPermission(DistanceRecord::class) in grantedData) {
+            exerciseMetrics += DistanceRecord.DISTANCE_TOTAL
+        }
+        if (HealthPermission.getReadPermission(ActiveCaloriesBurnedRecord::class) in grantedData) {
+            exerciseMetrics += ActiveCaloriesBurnedRecord.ACTIVE_CALORIES_TOTAL
+        }
         if (HealthPermission.getReadPermission(HeartRateRecord::class) in grantedData) {
             exerciseMetrics += HeartRateRecord.BPM_AVG
             exerciseMetrics += HeartRateRecord.BPM_MAX
         }
+
         if (HealthPermission.getReadPermission(ExerciseSessionRecord::class) in grantedData) {
             readAll<ExerciseSessionRecord>(client, instantFilter)
                 .sortedBy { it.startTime }
@@ -187,7 +234,9 @@ object HealthSyncEngine {
                                 timeRangeFilter = TimeRangeFilter.between(r.startTime, r.endTime)
                             )
                         )
-                    } else null
+                    } else {
+                        null
+                    }
                     egzersizler += listOf(
                         isoTime(r.startTime, zone),
                         isoTime(r.endTime, zone),
@@ -207,38 +256,65 @@ object HealthSyncEngine {
         }
 
         val dailyMetrics = linkedSetOf<AggregateMetric<*>>()
-        if (HealthPermission.getReadPermission(StepsRecord::class) in grantedData) dailyMetrics += StepsRecord.COUNT_TOTAL
-        if (HealthPermission.getReadPermission(DistanceRecord::class) in grantedData) dailyMetrics += DistanceRecord.DISTANCE_TOTAL
-        if (HealthPermission.getReadPermission(ActiveCaloriesBurnedRecord::class) in grantedData) dailyMetrics += ActiveCaloriesBurnedRecord.ACTIVE_CALORIES_TOTAL
-        if (HealthPermission.getReadPermission(TotalCaloriesBurnedRecord::class) in grantedData) dailyMetrics += TotalCaloriesBurnedRecord.ENERGY_TOTAL
-        if (HealthPermission.getReadPermission(ExerciseSessionRecord::class) in grantedData) dailyMetrics += ExerciseSessionRecord.EXERCISE_DURATION_TOTAL
-        if (HealthPermission.getReadPermission(SleepSessionRecord::class) in grantedData) dailyMetrics += SleepSessionRecord.SLEEP_DURATION_TOTAL
+        if (HealthPermission.getReadPermission(StepsRecord::class) in grantedData) {
+            dailyMetrics += StepsRecord.COUNT_TOTAL
+        }
+        if (HealthPermission.getReadPermission(DistanceRecord::class) in grantedData) {
+            dailyMetrics += DistanceRecord.DISTANCE_TOTAL
+        }
+        if (HealthPermission.getReadPermission(ActiveCaloriesBurnedRecord::class) in grantedData) {
+            dailyMetrics += ActiveCaloriesBurnedRecord.ACTIVE_CALORIES_TOTAL
+        }
+        if (HealthPermission.getReadPermission(TotalCaloriesBurnedRecord::class) in grantedData) {
+            dailyMetrics += TotalCaloriesBurnedRecord.ENERGY_TOTAL
+        }
+        if (HealthPermission.getReadPermission(ExerciseSessionRecord::class) in grantedData) {
+            dailyMetrics += ExerciseSessionRecord.EXERCISE_DURATION_TOTAL
+        }
+        if (HealthPermission.getReadPermission(SleepSessionRecord::class) in grantedData) {
+            dailyMetrics += SleepSessionRecord.SLEEP_DURATION_TOTAL
+        }
         if (HealthPermission.getReadPermission(HeartRateRecord::class) in grantedData) {
             dailyMetrics += HeartRateRecord.BPM_AVG
             dailyMetrics += HeartRateRecord.BPM_MIN
             dailyMetrics += HeartRateRecord.BPM_MAX
         }
-        if (HealthPermission.getReadPermission(RestingHeartRateRecord::class) in grantedData) dailyMetrics += RestingHeartRateRecord.BPM_AVG
-        if (HealthPermission.getReadPermission(WeightRecord::class) in grantedData) dailyMetrics += WeightRecord.WEIGHT_AVG
-        if (HealthPermission.getReadPermission(HydrationRecord::class) in grantedData) dailyMetrics += HydrationRecord.VOLUME_TOTAL
-        if (HealthPermission.getReadPermission(FloorsClimbedRecord::class) in grantedData) dailyMetrics += FloorsClimbedRecord.FLOORS_CLIMBED_TOTAL
-        if (HealthPermission.getReadPermission(ElevationGainedRecord::class) in grantedData) dailyMetrics += ElevationGainedRecord.ELEVATION_GAINED_TOTAL
+        if (HealthPermission.getReadPermission(RestingHeartRateRecord::class) in grantedData) {
+            dailyMetrics += RestingHeartRateRecord.BPM_AVG
+        }
+        if (HealthPermission.getReadPermission(WeightRecord::class) in grantedData) {
+            dailyMetrics += WeightRecord.WEIGHT_AVG
+        }
+        if (HealthPermission.getReadPermission(HydrationRecord::class) in grantedData) {
+            dailyMetrics += HydrationRecord.VOLUME_TOTAL
+        }
+        if (HealthPermission.getReadPermission(FloorsClimbedRecord::class) in grantedData) {
+            dailyMetrics += FloorsClimbedRecord.FLOORS_CLIMBED_TOTAL
+        }
+        if (HealthPermission.getReadPermission(ElevationGainedRecord::class) in grantedData) {
+            dailyMetrics += ElevationGainedRecord.ELEVATION_GAINED_TOTAL
+        }
 
         var todaySteps = 0L
         if (dailyMetrics.isNotEmpty()) {
             val grouped = client.aggregateGroupByPeriod(
                 AggregateGroupByPeriodRequest(
                     metrics = dailyMetrics,
-                    timeRangeFilter = TimeRangeFilter.between(startDate.atStartOfDay(), endDateExclusive.atStartOfDay()),
+                    timeRangeFilter = TimeRangeFilter.between(
+                        startDate.atStartOfDay(),
+                        endDateExclusive.atStartOfDay()
+                    ),
                     timeRangeSlicer = Period.ofDays(1)
                 )
             )
+
             grouped.sortedBy { it.startTime }.forEach { bucket ->
                 val date = bucket.startTime.toLocalDate()
                 val r = bucket.result
                 val steps = r[StepsRecord.COUNT_TOTAL]
                 if (date == today) todaySteps = steps ?: 0L
                 val extra = extras[date]
+
                 gunluk += listOf(
                     date.toString(),
                     steps,
@@ -260,6 +336,7 @@ object HealthSyncEngine {
                     "HealthConnect",
                     stamp
                 )
+
                 nabiz += listOf(
                     date.toString(),
                     r[HeartRateRecord.BPM_AVG],
@@ -273,7 +350,7 @@ object HealthSyncEngine {
             }
         }
 
-        GoogleSheetsClient.replaceAll(
+        val stats = GoogleSheetsClient.upsert(
             context,
             linkedMapOf(
                 "Gunluk" to gunluk,
@@ -284,13 +361,21 @@ object HealthSyncEngine {
             )
         )
 
-        if (historyGranted) AppPrefs.setHistoryImported(context, true)
-        val msg = if (historyGranted) {
-            "Google Sheet güncellendi; tüm geçmiş senkronize edildi"
-        } else {
-            "Google Sheet güncellendi; geçmiş izni yok, son 30 gün aktarıldı"
+        if (fullHistoryScan) AppPrefs.setHistoryImported(context, true)
+
+        val changeText = "Yeni ${stats.inserted}, güncellenen ${stats.updated}"
+        val msg = when {
+            fullHistoryScan ->
+                "Google Sheet güncellendi; erişilebilen tüm geçmiş kontrol edildi ($changeText)"
+            historyGranted ->
+                "Google Sheet güncellendi; son 30 gün kontrol edildi ($changeText)"
+            historyFeatureAvailable ->
+                "Google Sheet güncellendi; geçmiş izni yok, son 30 gün kontrol edildi ($changeText)"
+            else ->
+                "Google Sheet güncellendi; bu cihazda Health Connect geçmiş erişimi 30 günle sınırlı ($changeText)"
         }
-        return remember(context, true, msg, todaySteps, historyGranted)
+
+        return remember(context, true, msg, todaySteps, fullHistoryScan)
     }
 
     private suspend inline fun <reified T : Record> readAll(
@@ -314,7 +399,8 @@ object HealthSyncEngine {
         return out
     }
 
-    private fun round2(value: Double): Double = String.format(Locale.US, "%.2f", value).toDouble()
+    private fun round2(value: Double): Double =
+        String.format(Locale.US, "%.2f", value).toDouble()
 
     private fun isoTime(instant: Instant, zone: ZoneId): String =
         DateTimeFormatter.ISO_OFFSET_DATE_TIME.format(instant.atZone(zone))
