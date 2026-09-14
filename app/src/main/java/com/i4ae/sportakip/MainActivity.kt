@@ -22,6 +22,8 @@ import androidx.lifecycle.lifecycleScope
 import com.google.android.gms.auth.GoogleAuthUtil
 import com.google.android.gms.auth.UserRecoverableAuthException
 import kotlinx.coroutines.launch
+import java.time.LocalDateTime
+import java.time.format.DateTimeFormatter
 
 class MainActivity : ComponentActivity() {
     private lateinit var status: TextView
@@ -40,7 +42,9 @@ class MainActivity : ComponentActivity() {
 
     private val permissionLauncher = registerForActivityResult(
         PermissionController.createRequestPermissionResultContract()
-    ) { refresh() }
+    ) {
+        refresh()
+    }
 
     private val accountLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
         if (result.resultCode == Activity.RESULT_OK) {
@@ -65,7 +69,9 @@ class MainActivity : ComponentActivity() {
             }
         } else {
             retrySyncAfterAuth = false
+            saveStatus("Google Sheet erişimi verilmedi")
             Toast.makeText(this, "Google Sheet erişimi verilmedi", Toast.LENGTH_SHORT).show()
+            refresh()
         }
     }
 
@@ -232,20 +238,26 @@ class MainActivity : ComponentActivity() {
     private fun authorizeGoogle(syncAfter: Boolean) {
         lifecycleScope.launch {
             try {
+                status.text = "Google Sheet bağlantısı kontrol ediliyor…"
                 GoogleSheetsClient.ensureAuthorized(this@MainActivity)
                 SyncScheduler.apply(this@MainActivity)
+                saveStatus("Google Sheet yetkilendirmesi hazır")
                 Toast.makeText(this@MainActivity, "Google Sheet bağlantısı hazır", Toast.LENGTH_SHORT).show()
                 if (syncAfter) manualSync() else refresh()
             } catch (e: UserRecoverableAuthException) {
                 retrySyncAfterAuth = syncAfter
+                saveStatus("Google Sheet erişim izni gerekiyor")
                 val recoveryIntent = e.intent
                 if (recoveryIntent != null) {
                     authRecoveryLauncher.launch(recoveryIntent)
                 } else {
                     Toast.makeText(this@MainActivity, "Google yetkilendirme ekranı açılamadı", Toast.LENGTH_LONG).show()
+                    refresh()
                 }
             } catch (e: Exception) {
-                Toast.makeText(this@MainActivity, e.message ?: "Google bağlantı hatası", Toast.LENGTH_LONG).show()
+                val msg = googleErrorMessage(e)
+                saveStatus(msg)
+                Toast.makeText(this@MainActivity, msg, Toast.LENGTH_LONG).show()
                 refresh()
             }
         }
@@ -280,21 +292,32 @@ class MainActivity : ComponentActivity() {
             return
         }
         lifecycleScope.launch {
-            status.text = "Senkronize ediliyor… İlk geçmiş taraması biraz sürebilir."
+            status.text = "Google Sheet bağlantısı kontrol ediliyor…"
             syncButton.isEnabled = false
             try {
+                // Google tarafını önce doğrula. Böylece uzun Health Connect taramasından sonra
+                // eski/stale bir hata göstermek yerine gerçek OAuth/API hatasını hemen görürüz.
+                GoogleSheetsClient.ensureAuthorized(this@MainActivity)
+
+                status.text = "Health Connect okunuyor ve Google Sheet'e yazılıyor…"
                 val result = HealthSyncEngine.sync(this@MainActivity)
                 Toast.makeText(this@MainActivity, result.message, Toast.LENGTH_LONG).show()
             } catch (e: UserRecoverableAuthException) {
                 retrySyncAfterAuth = true
+                saveStatus("Google Sheet erişim izni gerekiyor")
                 val recoveryIntent = e.intent
                 if (recoveryIntent != null) {
                     authRecoveryLauncher.launch(recoveryIntent)
                 } else {
-                    Toast.makeText(this@MainActivity, "Google yetkilendirme ekranı açılamadı", Toast.LENGTH_LONG).show()
+                    val msg = "Google yetkilendirme ekranı açılamadı"
+                    saveStatus(msg)
+                    Toast.makeText(this@MainActivity, msg, Toast.LENGTH_LONG).show()
                 }
             } catch (e: Exception) {
-                Toast.makeText(this@MainActivity, e.message ?: "Senkronizasyon hatası", Toast.LENGTH_LONG).show()
+                val msg = if (isGoogleAuthError(e)) googleErrorMessage(e) else
+                    (e.message?.takeIf { it.isNotBlank() } ?: "Senkronizasyon hatası: ${e.javaClass.simpleName}")
+                saveStatus(msg)
+                Toast.makeText(this@MainActivity, msg, Toast.LENGTH_LONG).show()
             } finally {
                 syncButton.isEnabled = true
                 refresh()
@@ -310,11 +333,15 @@ class MainActivity : ComponentActivity() {
             else -> "Health Connect: kullanılamıyor"
         }
         val account = AppPrefs.googleAccount(this)
-        val sheetText = if (account.isNullOrBlank()) "Google Sheet: hesap bağlanmadı" else "Google Sheet: bağlı ($account)"
+        val sheetText = if (account.isNullOrBlank()) {
+            "Google hesabı: seçilmedi"
+        } else {
+            "Google hesabı: seçili ($account)"
+        }
         status.text = "$sdkText\n$sheetText"
         googleButton.text = if (account.isNullOrBlank()) "Google hesabını bağla" else "Google hesabını değiştir"
         autoSwitch.isChecked = AppPrefs.autoSync(this)
-        lastSync.text = "Son senkronizasyon: ${AppPrefs.lastSync(this)} — ${AppPrefs.lastStatus(this)}"
+        lastSync.text = "Son durum: ${AppPrefs.lastSync(this)} — ${AppPrefs.lastStatus(this)}"
 
         historyStatus.text = if (sdk != HealthConnectClient.SDK_AVAILABLE) {
             "Geçmiş erişimi: -"
@@ -331,14 +358,44 @@ class MainActivity : ComponentActivity() {
 
         if (sdk == HealthConnectClient.SDK_AVAILABLE) {
             lifecycleScope.launch {
-                steps.text = try {
-                    "Bugün: ${HealthSyncEngine.todaySteps(this@MainActivity)} adım"
+                val client = HealthConnectClient.getOrCreate(this@MainActivity)
+                val granted = try {
+                    client.permissionController.getGrantedPermissions()
                 } catch (_: Exception) {
-                    "Bugün: izin gerekli"
+                    emptySet()
+                }
+                val dataGranted = HealthSyncEngine.dataReadPermissions().count { it in granted }
+                val total = HealthSyncEngine.dataReadPermissions().size
+                steps.text = try {
+                    val today = HealthSyncEngine.todaySteps(this@MainActivity)
+                    "Bugün: $today adım  •  izin $dataGranted/$total"
+                } catch (_: Exception) {
+                    "Bugün: izin gerekli  •  izin $dataGranted/$total"
                 }
             }
         } else {
             steps.text = "Bugün: -"
+        }
+    }
+
+    private fun saveStatus(message: String) {
+        val stamp = DateTimeFormatter.ofPattern("dd.MM.yyyy HH:mm").format(LocalDateTime.now())
+        AppPrefs.setLastResult(this, stamp, message)
+    }
+
+    private fun isGoogleAuthError(e: Exception): Boolean {
+        val text = (e.message ?: "") + " " + e.javaClass.name
+        return text.contains("Google", ignoreCase = true) ||
+            text.contains("Auth", ignoreCase = true) ||
+            text.contains("UnregisteredOnApiConsole", ignoreCase = true)
+    }
+
+    private fun googleErrorMessage(e: Exception): String {
+        val raw = e.message?.takeIf { it.isNotBlank() } ?: e.javaClass.simpleName
+        return when {
+            raw.contains("UnregisteredOnApiConsole", ignoreCase = true) ->
+                "Google OAuth Android istemcisi kayıtlı değil (UnregisteredOnApiConsole)"
+            else -> "Google bağlantı hatası: $raw"
         }
     }
 
