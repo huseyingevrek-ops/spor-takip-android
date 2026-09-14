@@ -9,15 +9,19 @@ object AppPrefs {
     private const val KEY_START_HOUR = "start_hour"
     private const val KEY_LAST_SYNC = "last_sync"
     private const val KEY_LAST_STATUS = "last_status"
-    private const val KEY_HISTORY_IMPORTED = "history_imported_v3"
+    private const val KEY_HISTORY_IMPORTED = "history_imported_v4"
     private const val KEY_GOOGLE_ACCOUNT = "google_account"
 
     private fun prefs(context: Context) = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
 
     fun googleAccount(context: Context): String? = prefs(context).getString(KEY_GOOGLE_ACCOUNT, null)
+
     fun setGoogleAccount(context: Context, value: String?) {
+        val normalized = value?.takeIf { it.isNotBlank() }
+        val previous = googleAccount(context)
         prefs(context).edit().apply {
-            if (value.isNullOrBlank()) remove(KEY_GOOGLE_ACCOUNT) else putString(KEY_GOOGLE_ACCOUNT, value)
+            if (normalized == null) remove(KEY_GOOGLE_ACCOUNT) else putString(KEY_GOOGLE_ACCOUNT, normalized)
+            if (previous != normalized) putBoolean(KEY_HISTORY_IMPORTED, false)
         }.apply()
     }
 
