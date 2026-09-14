@@ -198,7 +198,7 @@ class MainActivity : ComponentActivity() {
         })
 
         root.addView(TextView(this).apply {
-            text = "İlk kullanımda Health Connect geçmiş erişimini ve Google Sheet erişimini onayla. Geçmiş erişimi verilmişse tüm mevcut geçmiş Sheet'e aktarılır. Android pil tasarrufu otomatik çalışmayı birkaç dakika geciktirebilir."
+            text = "Kayıtlı satırlar tekrar eklenmez; eksik olanlar eklenir ve değişen kayıtlar güncellenir. Cihaz geçmiş erişimini destekliyorsa ilk senkronizasyonda erişilebilen tüm geçmiş taranır; desteklemiyorsa Health Connect son 30 günle sınırlıdır. Android pil tasarrufu otomatik çalışmayı birkaç dakika geciktirebilir."
             textSize = 12f
             setPadding(0, dp(14), 0, 0)
         })
@@ -280,7 +280,7 @@ class MainActivity : ComponentActivity() {
             return
         }
         lifecycleScope.launch {
-            status.text = "Senkronize ediliyor… İlk tam aktarım biraz sürebilir."
+            status.text = "Senkronize ediliyor… İlk geçmiş taraması biraz sürebilir."
             syncButton.isEnabled = false
             try {
                 val result = HealthSyncEngine.sync(this@MainActivity)
@@ -315,11 +315,27 @@ class MainActivity : ComponentActivity() {
         googleButton.text = if (account.isNullOrBlank()) "Google hesabını bağla" else "Google hesabını değiştir"
         autoSwitch.isChecked = AppPrefs.autoSync(this)
         lastSync.text = "Son senkronizasyon: ${AppPrefs.lastSync(this)} — ${AppPrefs.lastStatus(this)}"
-        historyStatus.text = if (AppPrefs.historyImported(this)) "✓ Tüm geçmiş erişimi aktif" else "Geçmiş erişimi: ilk tam aktarım bekliyor"
+
+        historyStatus.text = if (sdk != HealthConnectClient.SDK_AVAILABLE) {
+            "Geçmiş erişimi: -"
+        } else {
+            val client = HealthConnectClient.getOrCreate(this)
+            val supported = client.features.getFeatureStatus(HealthConnectFeatures.FEATURE_READ_HEALTH_DATA_HISTORY) ==
+                HealthConnectFeatures.FEATURE_STATUS_AVAILABLE
+            when {
+                AppPrefs.historyImported(this) -> "✓ Geçmiş ilk taraması tamamlandı; tekrar kayıt yok"
+                supported -> "Geçmiş erişimi: izin verildiyse ilk tam tarama bekliyor"
+                else -> "Geçmiş erişimi: bu cihazda en fazla son 30 gün"
+            }
+        }
 
         if (sdk == HealthConnectClient.SDK_AVAILABLE) {
             lifecycleScope.launch {
-                steps.text = try { "Bugün: ${HealthSyncEngine.todaySteps(this@MainActivity)} adım" } catch (_: Exception) { "Bugün: izin gerekli" }
+                steps.text = try {
+                    "Bugün: ${HealthSyncEngine.todaySteps(this@MainActivity)} adım"
+                } catch (_: Exception) {
+                    "Bugün: izin gerekli"
+                }
             }
         } else {
             steps.text = "Bugün: -"
